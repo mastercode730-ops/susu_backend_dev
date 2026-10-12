@@ -309,8 +309,28 @@ router.post('/register', async (req, res) => {
     // requires Status='True', so without this the new account can never
     // log in. Flip it immediately since "turant active" was the chosen behavior.
     if (uid) {
-      // 15 Days Free Trial: Set Validity to exactly 15 days from today
-      await executeQuery(`UPDATE Users SET Status='True', Validity=DATEADD(day, 15, CAST(GETDATE() AS date)) WHERE UID=@uid`, { uid });
+      let trialDays = 15;
+      try {
+        const confRows = await executeQuery("SELECT ConfigValue FROM SystemConfig WHERE ConfigKey='FREE_TRIAL_DAYS'");
+        if (confRows && confRows[0] && !isNaN(parseInt(confRows[0].ConfigValue))) {
+          trialDays = parseInt(confRows[0].ConfigValue);
+        }
+      } catch(e) {}
+      await executeQuery(`UPDATE Users SET Status='True', Validity=DATEADD(day, @trialDays, CAST(GETDATE() AS date)) WHERE UID=@uid`, { uid, trialDays });
+      try {
+        const { logActivity } = require('../helpers/activityLogger');
+        await logActivity({
+          fUID: uid,
+          actorType: 'User',
+          actorID: String(uid),
+          actorName: mobile,
+          module: 'Auth',
+          action: 'User Registration',
+          entityType: 'User',
+          entityID: String(uid),
+          description: `New user registered with mobile ${mobile} (${trialDays}-day free trial granted)`
+        });
+      } catch(e) {}
     }
 
     res.json({ success: true, message: 'Account create ho gaya! Ab login karein.', uid });
