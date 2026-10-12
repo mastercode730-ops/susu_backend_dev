@@ -74,6 +74,7 @@ app.use('/api/received', require('./routes/received'));
 app.use('/api/lc', require('./routes/lc'));
 app.use('/api/yantri', require('./routes/yantri'));
 app.use('/api/admin', require('./routes/admin'));
+app.use('/api/subscription', require('./routes/subscription'));
 
 app.get('/api/health', (req, res) => {
   res.json({

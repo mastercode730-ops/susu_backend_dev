@@ -72,6 +72,38 @@ router.post('/login', async (req, res) => {
     }
 
     if (!users || users.length === 0) {
+      // Check if user exists with matching password but expired validity
+      const expiredCheck = await executeQuery(
+        `SELECT UID, Mobile, Validity, Status, IsSuperAdmin, IsRefreshStatus FROM Users WHERE Mobile = @mobile AND Password = @password`,
+        { mobile, password }
+      );
+      if (expiredCheck && expiredCheck.length > 0) {
+        const expUser = expiredCheck[0];
+        const valDate = expUser.Validity ? new Date(expUser.Validity) : null;
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        if (!valDate || valDate.getTime() < today.getTime()) {
+          const expPayload = {
+            UID: expUser.UID,
+            Mobile: mobile,
+            SuperAdmin: 'SuperAdmin',
+            SuperAdminStatus: expUser.IsSuperAdmin ? expUser.IsSuperAdmin.toString() : 'False',
+            IsRefreshStatus: expUser.IsRefreshStatus ? expUser.IsRefreshStatus.toString() : 'False',
+            SubUID: null,
+            isExpired: true,
+            validity: expUser.Validity
+          };
+          const expToken = generateToken(expPayload);
+          return res.status(200).json({
+            success: true,
+            expired: true,
+            token: expToken,
+            user: expPayload,
+            message: 'Aapka 15-day free trial ya subscription expire ho chuka hai. Kripya plan renew karein.'
+          });
+        }
+      }
       return res.status(401).json({ success: false, message: 'Mobile ya password galat hai' });
     }
 
@@ -82,13 +114,21 @@ router.post('/login', async (req, res) => {
       if (rf && rf[0]) isRefreshStatus = rf[0].IsRefreshStatus?.toString() || 'False';
     } catch (e) {}
 
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const uValDate = user.Validity ? new Date(user.Validity) : null;
+    const isExp = !uValDate || uValDate.getTime() < today.getTime();
+    const daysRem = uValDate ? Math.max(0, Math.ceil((uValDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))) : 0;
+
     const payload = {
       UID: user.UID,
       Mobile: mobile,
       SuperAdmin: 'SuperAdmin',
       SuperAdminStatus: user.IsSuperAdmin ? user.IsSuperAdmin.toString() : 'False',
       IsRefreshStatus: isRefreshStatus,
-      SubUID: null
+      SubUID: null,
+      validity: user.Validity,
+      isExpired: isExp,
+      daysRemaining: daysRem
     };
 
     const token = generateToken(payload);
@@ -117,6 +157,22 @@ router.post('/subuser-login', async (req, res) => {
     }
 
     const subUser = subUsers[0];
+
+    // Check parent admin subscription validity
+    const parentRows = await executeQuery(`SELECT Validity, Status FROM Users WHERE UID = @parentUID`, { parentUID: subUser.fcreatedUID });
+    if (parentRows && parentRows.length > 0) {
+      const pVal = parentRows[0].Validity ? new Date(parentRows[0].Validity) : null;
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      if (!pVal || pVal.getTime() < today.getTime()) {
+        return res.status(403).json({
+          success: false,
+          expired: true,
+          message: 'Main Admin ka subscription expire ho chuka hai. Kripya Admin se renew karne ko kahein.'
+        });
+      }
+    }
+
     const access = await bindAccessRight(subUserID);
 
     const payload = {
@@ -143,6 +199,18 @@ router.get('/me', requireAuth, async (req, res) => {
     if (user.SubUID) {
       const access = await bindAccessRight(user.SubUID);
       Object.assign(user, access);
+    }
+    // Fetch latest validity from DB for main user
+    if (!user.SubUID && user.UID) {
+      const uRows = await executeQuery(`SELECT Validity FROM Users WHERE UID = @uid`, { uid: user.UID });
+      if (uRows && uRows[0]) {
+        const uVal = uRows[0].Validity ? new Date(uRows[0].Validity) : null;
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        user.validity = uRows[0].Validity;
+        user.isExpired = !uVal || uVal.getTime() < today.getTime();
+        user.daysRemaining = uVal ? Math.max(0, Math.ceil((uVal.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))) : 0;
+      }
     }
     res.json({ success: true, user });
   } catch (e) {
@@ -241,7 +309,8 @@ router.post('/register', async (req, res) => {
     // requires Status='True', so without this the new account can never
     // log in. Flip it immediately since "turant active" was the chosen behavior.
     if (uid) {
-      await executeQuery(`UPDATE Users SET Status='True' WHERE UID=@uid`, { uid });
+      // 15 Days Free Trial: Set Validity to exactly 15 days from today
+      await executeQuery(`UPDATE Users SET Status='True', Validity=DATEADD(day, 15, CAST(GETDATE() AS date)) WHERE UID=@uid`, { uid });
     }
 
     res.json({ success: true, message: 'Account create ho gaya! Ab login karein.', uid });

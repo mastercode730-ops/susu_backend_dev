@@ -51,7 +51,7 @@ router.get('/stats', requireAuth, requireSA, async (req, res) => {
 // GET /api/admin/users
 router.get('/users', requireAuth, requireSA, async (req, res) => {
   try {
-    const data = await executeQuery(`SELECT UID, Mobile, IsSuperAdmin, IsActive, ValidityDate, RegisteredOn FROM Users ORDER BY RegisteredOn DESC`);
+    const data = await executeQuery(`SELECT UID, Mobile, IsSuperAdmin, Status AS IsActive, Validity AS ValidityDate, RegisteredOn FROM Users ORDER BY RegisteredOn DESC`);
     res.json({ success: true, data: data || [] });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -75,7 +75,7 @@ router.put('/users/:uid', requireAuth, requireSA, async (req, res) => {
   try {
     const { mobile, isActive, validityDate, isSuperAdmin: isSA } = req.body;
     await executeQuery(
-      `UPDATE Users SET Mobile=@mobile, IsActive=@isActive, ValidityDate=@validityDate, IsSuperAdmin=@isSA WHERE UID=@uid`,
+      `UPDATE Users SET Mobile=@mobile, Status=@isActive, Validity=@validityDate, IsSuperAdmin=@isSA WHERE UID=@uid`,
       { uid: parseInt(req.params.uid), mobile, isActive: isActive ? 'True' : 'False', validityDate: validityDate || null, isSA: isSA ? 'True' : 'False' }
     );
     res.json({ success: true, message: 'User updated' });
@@ -374,3 +374,67 @@ router.get('/switch-user/:uid', requireAuth, requireSA, async (req, res) => {
 });
 
 module.exports = router;
+
+// GET /api/admin/subscriptions — All Razorpay transactions & subscriber status
+router.get('/subscriptions', requireAuth, requireSA, async (req, res) => {
+  try {
+    const data = await executeQuery(
+      `SELECT sp.PaymentID, sp.UID, sp.Mobile, sp.PlanName, sp.PlanDays, sp.Amount, sp.Currency,
+              sp.RazorpayOrderId, sp.RazorpayPaymentId, sp.PaymentStatus, sp.PreviousValidity, sp.NewValidity, sp.CreatedAt,
+              u.Validity AS CurrentValidity, u.Status AS UserStatus
+       FROM SubscriptionPayments sp
+       LEFT JOIN Users u ON sp.UID = u.UID
+       ORDER BY sp.PaymentID DESC`
+    );
+    const summary = await executeQuery(
+      `SELECT 
+         COUNT(*) AS TotalOrders,
+         SUM(CASE WHEN PaymentStatus='SUCCESS' THEN 1 ELSE 0 END) AS SuccessfulOrders,
+         SUM(CASE WHEN PaymentStatus='SUCCESS' THEN Amount ELSE 0 END) AS TotalRevenue
+       FROM SubscriptionPayments`
+    );
+    res.json({ success: true, data: data || [], summary: summary?.[0] || {} });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// POST /api/admin/extend-subscription — Manual extension by SuperAdmin
+router.post('/extend-subscription', requireAuth, requireSA, async (req, res) => {
+  try {
+    const { uid, days, newValidityDate } = req.body;
+    if (!uid) return res.status(400).json({ success: false, message: 'UID required' });
+
+    let finalDateStr = '';
+    if (newValidityDate) {
+      finalDateStr = newValidityDate;
+    } else if (days) {
+      const uRows = await executeQuery(`SELECT Validity FROM Users WHERE UID=@uid`, { uid: parseInt(uid) });
+      const cur = uRows?.[0]?.Validity ? new Date(uRows[0].Validity) : null;
+      const today = new Date(); today.setHours(0,0,0,0);
+      let base = (cur && cur.getTime() >= today.getTime()) ? cur : today;
+      const target = new Date(base.getTime() + parseInt(days) * 24 * 60 * 60 * 1000);
+      finalDateStr = target.toISOString().split('T')[0];
+    } else {
+      return res.status(400).json({ success: false, message: 'Days or newValidityDate required' });
+    }
+
+    await executeQuery(
+      `UPDATE Users SET Validity=@val, Status='True' WHERE UID=@uid`,
+      { val: finalDateStr, uid: parseInt(uid) }
+    );
+
+    // Record manual grant in history
+    const uRows = await executeQuery(`SELECT Mobile FROM Users WHERE UID=@uid`, { uid: parseInt(uid) });
+    const mobile = uRows?.[0]?.Mobile || '';
+    await executeQuery(
+      `INSERT INTO SubscriptionPayments (UID, Mobile, PlanName, PlanDays, Amount, RazorpayOrderId, PaymentStatus, NewValidity)
+       VALUES (@uid, @mobile, 'Manual Admin Grant', @days, 0, 'MANUAL_GRANT', 'SUCCESS', @val)`,
+      { uid: parseInt(uid), mobile, days: days || 0, val: finalDateStr }
+    );
+
+    res.json({ success: true, message: 'Subscription successfully extended!', validity: finalDateStr });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
