@@ -100,6 +100,14 @@ router.get('/status', requireAuth, async (req, res) => {
     const hasPaid = (history || []).some(h => h.PaymentStatus === 'SUCCESS');
     const isTrial = !hasPaid && !isExpired;
 
+    let trialDays = 12;
+    try {
+      const conf = await executeQuery("SELECT ConfigValue FROM SystemConfig WHERE ConfigKey='FREE_TRIAL_DAYS'");
+      if (conf && conf[0] && !isNaN(parseInt(conf[0].ConfigValue))) {
+        trialDays = parseInt(conf[0].ConfigValue);
+      }
+    } catch(e) {}
+
     res.json({
       success: true,
       data: {
@@ -110,7 +118,8 @@ router.get('/status', requireAuth, async (req, res) => {
         daysRemaining: Math.max(0, daysRemaining),
         isExpired,
         isTrial,
-        planType: isTrial ? 'Free Trial (15 Days)' : (hasPaid ? 'Paid Subscription' : 'Expired Plan'),
+        trialDays,
+        planType: isTrial ? `Free Trial (${trialDays} Days)` : (hasPaid ? 'Paid Subscription' : 'Expired Plan'),
         history: history || []
       }
     });

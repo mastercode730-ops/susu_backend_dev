@@ -7,9 +7,14 @@ const { logActivity } = require('../helpers/activityLogger');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'susu9_mobile_jwt_secret_2024_xK9mP';
 
+function isSuperAdminUser(u) {
+  if (!u || u.SubUID) return false;
+  return u.IsSuperAdmin === 1 || u.IsSuperAdmin === true || String(u.IsSuperAdmin) === '1' || String(u.SuperAdminStatus).toLowerCase() === 'true';
+}
+
 function requireSA(req, res, next) {
-  if (req.user && !req.user.SubUID && req.user.SuperAdmin === 'SuperAdmin') return next();
-  res.status(403).json({ success: false, message: 'SuperAdmin required' });
+  if (isSuperAdminUser(req.user)) return next();
+  res.status(403).json({ success: false, message: 'SuperAdmin access required' });
 }
 
 function getIST() {
@@ -97,9 +102,16 @@ router.get('/dashboard-stats', requireAuth, requireSA, async (req, res) => {
     const configs = {};
     (configRes || []).forEach(c => { configs[c.ConfigKey] = c.ConfigValue; });
 
+    let freeTrialDays = 12;
+    try {
+      const cfgRow = await executeQuery("SELECT ConfigValue FROM SystemConfig WHERE ConfigKey='FREE_TRIAL_DAYS'");
+      if (cfgRow && cfgRow[0] && !isNaN(parseInt(cfgRow[0].ConfigValue))) freeTrialDays = parseInt(cfgRow[0].ConfigValue);
+    } catch(e) {}
+
     res.json({
       success: true,
       data: {
+        freeTrialDays,
         kpis: {
           totalUsers,
           totalSubUsers: sStats.TotalSubUsers || 0,
@@ -578,13 +590,29 @@ router.post('/configurations', requireAuth, requireSA, async (req, res) => {
     const { freeTrialDays, subscriptionPlans, maintenanceMode, broadcastNotice } = req.body;
 
     if (freeTrialDays !== undefined) {
+      const days = parseInt(freeTrialDays);
       await executeQuery(`
         MERGE SystemConfig AS target
         USING (SELECT 'FREE_TRIAL_DAYS' AS ConfigKey) AS src
         ON target.ConfigKey = src.ConfigKey
         WHEN MATCHED THEN UPDATE SET ConfigValue = @val, UpdatedAt = GETDATE(), UpdatedBy = @by
         WHEN NOT MATCHED THEN INSERT (ConfigKey, ConfigValue, UpdatedAt, UpdatedBy) VALUES ('FREE_TRIAL_DAYS', @val, GETDATE(), @by);
-      `, { val: String(freeTrialDays), by: req.user.Mobile || 'SuperAdmin' });
+      `, { val: String(days), by: req.user.Mobile || 'SuperAdmin' });
+
+      // Automatically sync all active unpaid trial users to the new trial duration
+      if (!isNaN(days) && days > 0) {
+        await executeQuery(`
+          UPDATE Users
+          SET Validity = DATEADD(day, @days, CAST(ISNULL(RegisteredOn, GETDATE()) AS date))
+          WHERE (IsSuperAdmin = 0 OR IsSuperAdmin IS NULL OR IsSuperAdmin = 'False')
+            AND (Validity IS NULL OR YEAR(Validity) < 2040)
+            AND UID NOT IN (
+              SELECT DISTINCT UID 
+              FROM SubscriptionPayments 
+              WHERE PaymentStatus = 'SUCCESS' OR PaymentStatus = 'paid'
+            )
+        `, { days });
+      }
     }
 
     if (subscriptionPlans !== undefined) {
@@ -1008,6 +1036,131 @@ router.get('/open-yantri', requireAuth, requireSA, async (req, res) => {
       Todate: date || getIST(), UID: uid, GID: gameID, OpType: 2
     });
     res.json({ success: true, data: data || [] });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+
+// =========================================================================
+// STAFF SUBUSERS & ACCESS RIGHTS (FOR PRIMARY ACCOUNT HOLDERS)
+// =========================================================================
+router.get('/subusers', requireAuth, async (req, res) => {
+  try {
+    const uid = req.user.UID;
+    const data = await executeQuery(
+      `SELECT SubUserID, subusername, Mobile, Password, IsActive FROM subusers WHERE fcreatedUID=@uid`,
+      { uid }
+    );
+    res.json({ success: true, data: data || [] });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.post('/subusers', requireAuth, async (req, res) => {
+  try {
+    const uid = req.user.UID;
+    const { name, mobile, password, isActive } = req.body;
+    if (!name || !String(name).trim()) return res.status(400).json({ success: false, message: 'Name is required' });
+    if (!mobile || !String(mobile).trim()) return res.status(400).json({ success: false, message: 'Mobile number is required' });
+    await executeStoredProcedure('AddSubusers', {
+      Name: String(name).trim(), Mobile: String(mobile).trim(), password: password || '', IsActive: isActive !== false, createdid: uid
+    });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.put('/subusers/:id', requireAuth, async (req, res) => {
+  try {
+    const uid = req.user.UID;
+    const { name, mobile, password, isActive } = req.body;
+    if (!name || !String(name).trim()) return res.status(400).json({ success: false, message: 'Name is required' });
+    if (!mobile || !String(mobile).trim()) return res.status(400).json({ success: false, message: 'Mobile number is required' });
+    await executeStoredProcedure('UpdateSubusers', {
+      subid: req.params.id, Name: String(name).trim(), Mobile: String(mobile).trim(), password: password || '', IsActive: isActive !== false, createdid: uid
+    });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.get('/access-rights', requireAuth, async (req, res) => {
+  try {
+    const uid = req.user.UID;
+    const { subUID } = req.query;
+    let data;
+    if (subUID) {
+      data = await executeQuery(`SELECT * FROM AccessRight WHERE ARfSatffID=@subUID`, { subUID });
+    } else {
+      data = await executeStoredProcedure('ShowAllAccessRight', { fUID: uid });
+    }
+    res.json({ success: true, data: data || [] });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.get('/access-rights/:id', requireAuth, async (req, res) => {
+  try {
+    const subUID = req.params.id;
+    const data = await executeQuery(`SELECT * FROM AccessRight WHERE ARfSatffID=@subUID`, { subUID });
+    res.json({ success: true, data: data && data[0] ? data[0] : null });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.post('/access-rights', requireAuth, async (req, res) => {
+  try {
+    const { subUserID, addContacts, addGames, result, findChat, hisab, hisabSummary,
+            dateWiseHisab, accounts, showAllAccounts, subUsers, balance, lc, plYantri, yantri, absentReport, changePassword } = req.body;
+    const uid = req.user.UID;
+
+    const existing = await executeQuery(
+      `SELECT COUNT(*) AS cnt FROM AccessRight WHERE ARfSatffID=@subUserID AND fUID=@uid`,
+      { subUserID, uid }
+    );
+    const count = existing?.[0]?.cnt || 0;
+
+    if (count === 0) {
+      await executeQuery(
+        `INSERT INTO AccessRight
+         (fUID, ARfSatffID, ADDContacts, ADDGames, Result, FindChat, Hisab, HisabSummary, DateWiseHisab, Accounts, ShowAllAccounts, SubUsers, Balance, LC, PLYantri, Yantri, AbsentReport, ChangePassword)
+         VALUES
+         (@uid, @subUserID, @addContacts, @addGames, @result, @findChat, @hisab, @hisabSummary, @dateWiseHisab, @accounts, @showAllAccounts, @subUsers, @balance, @lc, @plYantri, @yantri, @absentReport, @changePassword)`,
+        {
+          uid, subUserID,
+          addContacts: !!addContacts, addGames: !!addGames, result: !!result, findChat: !!findChat,
+          hisab: !!hisab, hisabSummary: !!hisabSummary, dateWiseHisab: !!dateWiseHisab,
+          accounts: !!accounts, showAllAccounts: !!showAllAccounts, subUsers: !!subUsers,
+          balance: !!balance, lc: !!lc, plYantri: !!plYantri, yantri: !!yantri,
+          absentReport: !!absentReport, changePassword: !!changePassword
+        }
+      );
+    } else {
+      await executeQuery(
+        `UPDATE AccessRight SET
+         ADDContacts=@addContacts, ADDGames=@addGames, Result=@result, FindChat=@findChat,
+         Hisab=@hisab, HisabSummary=@hisabSummary, DateWiseHisab=@dateWiseHisab,
+         Accounts=@accounts, ShowAllAccounts=@showAllAccounts, SubUsers=@subUsers,
+         Balance=@balance, LC=@lc, PLYantri=@plYantri, Yantri=@yantri,
+         AbsentReport=@absentReport, ChangePassword=@changePassword
+         WHERE ARfSatffID=@subUserID AND fUID=@uid`,
+        {
+          uid, subUserID,
+          addContacts: !!addContacts, addGames: !!addGames, result: !!result, findChat: !!findChat,
+          hisab: !!hisab, hisabSummary: !!hisabSummary, dateWiseHisab: !!dateWiseHisab,
+          accounts: !!accounts, showAllAccounts: !!showAllAccounts, subUsers: !!subUsers,
+          balance: !!balance, lc: !!lc, plYantri: !!plYantri, yantri: !!yantri,
+          absentReport: !!absentReport, changePassword: !!changePassword
+        }
+      );
+    }
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

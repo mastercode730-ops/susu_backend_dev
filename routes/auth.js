@@ -84,11 +84,13 @@ router.post('/login', async (req, res) => {
         today.setHours(0, 0, 0, 0);
 
         if (!valDate || valDate.getTime() < today.getTime()) {
+          const isSAExp = (expUser.IsSuperAdmin === 1 || expUser.IsSuperAdmin === true || String(expUser.IsSuperAdmin) === '1' || String(expUser.IsSuperAdmin).toLowerCase() === 'true');
           const expPayload = {
             UID: expUser.UID,
             Mobile: mobile,
             SuperAdmin: 'SuperAdmin',
-            SuperAdminStatus: expUser.IsSuperAdmin ? expUser.IsSuperAdmin.toString() : 'False',
+            SuperAdminStatus: isSAExp ? 'True' : 'False',
+            IsSuperAdmin: isSAExp ? 1 : 0,
             IsRefreshStatus: expUser.IsRefreshStatus ? expUser.IsRefreshStatus.toString() : 'False',
             SubUID: null,
             isExpired: true,
@@ -100,7 +102,7 @@ router.post('/login', async (req, res) => {
             expired: true,
             token: expToken,
             user: expPayload,
-            message: 'Aapka 15-day free trial ya subscription expire ho chuka hai. Kripya plan renew karein.'
+            message: 'Aapka free trial ya subscription expire ho chuka hai. Kripya plan renew karein.'
           });
         }
       }
@@ -109,9 +111,13 @@ router.post('/login', async (req, res) => {
 
     const user = users[0];
     let isRefreshStatus = 'False';
+    let isSuperAdminFromDb = null;
     try {
-      const rf = await executeQuery(`SELECT IsRefreshStatus FROM Users WHERE UID=@uid`, { uid: user.UID });
-      if (rf && rf[0]) isRefreshStatus = rf[0].IsRefreshStatus?.toString() || 'False';
+      const rf = await executeQuery(`SELECT IsRefreshStatus, IsSuperAdmin FROM Users WHERE UID=@uid`, { uid: user.UID });
+      if (rf && rf[0]) {
+        isRefreshStatus = rf[0].IsRefreshStatus?.toString() || 'False';
+        isSuperAdminFromDb = rf[0].IsSuperAdmin;
+      }
     } catch (e) {}
 
     const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -119,11 +125,18 @@ router.post('/login', async (req, res) => {
     const isExp = !uValDate || uValDate.getTime() < today.getTime();
     const daysRem = uValDate ? Math.max(0, Math.ceil((uValDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))) : 0;
 
+    let isSuperAdminVal = 0;
+    const rawSA = isSuperAdminFromDb !== null && isSuperAdminFromDb !== undefined ? isSuperAdminFromDb : user.IsSuperAdmin;
+    if (rawSA !== null && rawSA !== undefined) {
+      isSuperAdminVal = (rawSA === 1 || rawSA === true || String(rawSA) === '1' || String(rawSA).toLowerCase() === 'true') ? 1 : 0;
+    }
+
     const payload = {
       UID: user.UID,
       Mobile: mobile,
       SuperAdmin: 'SuperAdmin',
-      SuperAdminStatus: user.IsSuperAdmin ? user.IsSuperAdmin.toString() : 'False',
+      SuperAdminStatus: isSuperAdminVal === 1 ? 'True' : 'False',
+      IsSuperAdmin: isSuperAdminVal,
       IsRefreshStatus: isRefreshStatus,
       SubUID: null,
       validity: user.Validity,
@@ -200,9 +213,9 @@ router.get('/me', requireAuth, async (req, res) => {
       const access = await bindAccessRight(user.SubUID);
       Object.assign(user, access);
     }
-    // Fetch latest validity from DB for main user
+    // Fetch latest validity and super admin status from DB for main user
     if (!user.SubUID && user.UID) {
-      const uRows = await executeQuery(`SELECT Validity FROM Users WHERE UID = @uid`, { uid: user.UID });
+      const uRows = await executeQuery(`SELECT Validity, IsSuperAdmin FROM Users WHERE UID = @uid`, { uid: user.UID });
       if (uRows && uRows[0]) {
         const uVal = uRows[0].Validity ? new Date(uRows[0].Validity) : null;
         const today = new Date();
@@ -210,7 +223,14 @@ router.get('/me', requireAuth, async (req, res) => {
         user.validity = uRows[0].Validity;
         user.isExpired = !uVal || uVal.getTime() < today.getTime();
         user.daysRemaining = uVal ? Math.max(0, Math.ceil((uVal.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))) : 0;
+
+        const isSA = (uRows[0].IsSuperAdmin === 1 || uRows[0].IsSuperAdmin === true || String(uRows[0].IsSuperAdmin) === '1' || String(uRows[0].IsSuperAdmin).toLowerCase() === 'true') ? 1 : 0;
+        user.IsSuperAdmin = isSA;
+        user.SuperAdminStatus = isSA === 1 ? 'True' : 'False';
       }
+    } else if (user.SubUID) {
+      user.IsSuperAdmin = 0;
+      user.SuperAdminStatus = 'False';
     }
     res.json({ success: true, user });
   } catch (e) {
