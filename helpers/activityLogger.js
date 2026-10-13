@@ -1,4 +1,4 @@
-const { executeQuery } = require('../db');
+const { executeQuery } = require('../config/database');
 
 async function logActivity({
   fUID = null,
