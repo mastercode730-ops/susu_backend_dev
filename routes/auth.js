@@ -117,11 +117,19 @@ router.post('/subuser-login', async (req, res) => {
     }
 
     const subUser = subUsers[0];
+    const parentUID = subUser.fcreatedUID;
     const access = await bindAccessRight(subUserID);
 
+    let parentMobile = '';
+    try {
+      const parentRows = await executeQuery(`SELECT Mobile FROM Users WHERE UID = @uid`, { uid: parentUID });
+      if (parentRows && parentRows[0]) parentMobile = parentRows[0].Mobile;
+    } catch (e) {}
+
     const payload = {
-      UID: subUser.fcreatedUID,
-      Mobile: subUser.Mobile || '',
+      UID: parentUID,
+      Mobile: parentMobile || subUser.Mobile || '',
+      StaffMobile: subUser.Mobile || '',
       SuperAdmin: '',
       SuperAdminStatus: 'False',
       SubUID: subUserID,

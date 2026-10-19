@@ -87,12 +87,20 @@ router.get('/messages', requireAuth, async (req, res) => {
   try {
     const uid = req.user.UID;
     const mobile = req.user.Mobile;
-    const { viewAll, fromDate, toDate } = req.query;
-    // SP GetMySendMessage takes only fSenderID + Filter
-    const data = await executeStoredProcedure('GetMySendMessage', {
+    const filter = (req.query.filter || '').trim();
+
+    let data = await executeStoredProcedure('GetMySendMessage', {
       fSenderID: mobile || uid,
-      Filter: ''
+      Filter: filter
     });
+
+    if (!data || data.length === 0) {
+      data = await executeStoredProcedure('FetchReceiverList', {
+        fUID: String(uid),
+        Filter: filter
+      });
+    }
+
     res.json({ success: true, data: data || [] });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
