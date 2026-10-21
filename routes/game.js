@@ -165,6 +165,22 @@ router.post('/save-result', requireAuth, async (req, res) => {
     }
 
     await calculateGameResult(gid, dateStr, cleanResult, req.user.UID);
+
+    // Sync result to alternate/split Game IDs so calculations never get missed
+    const aliasMap = {
+      61234: 11428,
+      11428: 61234,
+      61235: 11429,
+      11429: 61235
+    };
+    if (aliasMap[gid]) {
+      try {
+        await calculateGameResult(aliasMap[gid], dateStr, cleanResult, req.user.UID);
+      } catch (aliasErr) {
+        console.warn('Alias save-result error:', aliasErr.message);
+      }
+    }
+
     res.json({ success: true, message: 'Result saved' });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
