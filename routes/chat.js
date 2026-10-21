@@ -67,21 +67,13 @@ router.get('/messages', requireAuth, async (req, res) => {
   try {
     const { gameId, selectedUID, date } = req.query;
     const uid = req.user.UID;
-    const gid = parseInt(gameId);
-    const aliasMap = {
-      61234: [61234, 11428],
-      11428: [61234, 11428],
-      61235: [61235, 11429],
-      11429: [61235, 11429]
-    };
-    const gids = (gid && aliasMap[gid]) ? aliasMap[gid] : [gid];
     const data = await executeQuery(
       `SELECT * FROM Chat
-       WHERE fGameID IN (${gids.join(',')})
+       WHERE (@gameId IS NULL OR fGameID = @gameId)
        AND (fSenderID = @uid OR fReceiverID = @uid)
        AND (@selectedUID IS NULL OR fSenderID = @selectedUID OR fReceiverID = @selectedUID)
        ORDER BY MessageDateTime ASC`,
-      { uid, selectedUID: selectedUID ? parseInt(selectedUID) : null }
+      { uid, gameId: gameId ? parseInt(gameId) : null, selectedUID: selectedUID ? parseInt(selectedUID) : null }
     );
     res.json({ success: true, data: data || [] });
   } catch (err) {
@@ -130,19 +122,6 @@ router.get('/received', requireAuth, async (req, res) => {
       Rates: rates || '0/100-0/10-0',
       IsReceiverPage: true
     });
-    const gidNum = parseInt(gameId);
-    const aliasMapSingle = { 61234: 11428, 11428: 61234, 61235: 11429, 11429: 61235 };
-    if ((!data || !data.length) && aliasMapSingle[gidNum]) {
-      const aliasData = await executeStoredProcedure('FetchSenderMessageWhatsAppLike', {
-        fSenderID: uid,
-        fGameID: aliasMapSingle[gidNum],
-        date: parsedDate,
-        fReceiverID: fReceiverID,
-        Rates: rates || '0/100-0/10-0',
-        IsReceiverPage: true
-      });
-      if (aliasData && aliasData.length) data = aliasData;
-    }
     res.json({ success: true, data: data || [] });
   } catch (err) {
     console.error('chat/received:', err.message);

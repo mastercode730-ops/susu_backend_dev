@@ -183,24 +183,6 @@ router.get('/summary', requireAuth, async (req, res) => {
       CID: cid || null
     });
 
-    const aliasMap = {
-      '61234': '11428',
-      '11428': '61234',
-      '61235': '11429',
-      '11429': '61235'
-    };
-    if (gid && (!data || !data.length) && aliasMap[String(gid)]) {
-      const aliasData = await executeStoredProcedure('GetHisabSummary', {
-        date: toSqlDate(fromDate),
-        date1: toSqlDate(toDate),
-        UID: uid,
-        GID: aliasMap[String(gid)],
-        CID: cid || null
-      });
-      if (aliasData && aliasData.length) {
-        data = aliasData;
-      }
-    }
     if (assigned && data) {
       data = data.filter(r => assigned.isMatch(r));
     }
