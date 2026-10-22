@@ -260,22 +260,52 @@ router.post('/transfer', requireAuth, async (req, res) => {
   }
 });
 
-// DELETE /api/accounts/:aid — if this entry is one leg of a Transfer (tagged
-// `~tx<pairedAID>` in Narration), delete its paired leg too so the ledger
-// never ends up with an orphaned half of a transfer.
+// DELETE /api/accounts/:aid
 router.delete('/:aid', requireAuth, async (req, res) => {
   try {
     const aid = parseInt(req.params.aid);
-    const row = await executeQuery(`SELECT Narration FROM Accounts WHERE AID=@aid`, { aid });
-    const m = row?.[0]?.Narration && row[0].Narration.match(/~tx(\d+)\s*$/);
-    const pairedAid = m && m[1] !== '0' ? parseInt(m[1]) : null;
-
-    await executeQuery(`DELETE FROM Accounts WHERE AID=@aid`, { aid });
-    if (pairedAid) {
-      await executeQuery(`DELETE FROM Accounts WHERE AID=@pairedAid`, { pairedAid });
-    }
-    res.json({ success: true, pairedDeleted: !!pairedAid });
+    const uid = req.user ? req.user.UID : (req.session?.user?.UID);
+    await executeStoredProcedure('DeleteTransaction', { AID: aid, CreatedBy: uid });
+    res.json({ success: true, message: 'Transaction deleted successfully' });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
+
+// PUT /api/accounts/:aid (and POST /api/accounts/update/:aid)
+async function handleUpdateTx(req, res) {
+  try {
+    const aid = parseInt(req.params.aid);
+    const uid = req.user ? req.user.UID : (req.session?.user?.UID);
+    const customerUID = req.body.customerUID !== undefined ? req.body.customerUID : req.body.cusID;
+    const { date, type, amount, narration, staffID } = req.body;
+    if (!amount || !type) return res.status(400).json({ success: false, message: 'Amount and Type required' });
+    const typeMap = {
+      'Payment/Diye': 'Paid',
+      'Receipt/Liye': 'Received',
+      'AdjustReceipt(-)': 'Receive Adjustment',
+      'AdjustPayment(+)': 'Paid Adjustment'
+    };
+    const finalType = typeMap[type] || type;
+    const fStaff = (finalType === 'Paid' || finalType === 'Received') && staffID ? parseInt(staffID) : 0;
+    const fCusID = (customerUID === 'Self' || customerUID === '0' || customerUID === 0) ? 0 : parseInt(customerUID);
+
+    await executeStoredProcedure('UpdateTransaction', {
+      AID: aid,
+      fCusID,
+      date: toSqlDate(date),
+      Type: finalType,
+      Amount: parseFloat(amount),
+      CreatedBy: uid,
+      Narration: narration || '',
+      fStaff
+    });
+    res.json({ success: true, message: 'Transaction updated successfully' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+}
+
+router.put('/:aid', requireAuth, handleUpdateTx);
+router.post('/update/:aid', requireAuth, handleUpdateTx);
+router.post('/:aid', requireAuth, handleUpdateTx);
 
 module.exports = router;
