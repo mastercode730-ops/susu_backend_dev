@@ -47,12 +47,12 @@ router.get('/customers', requireAuth, async (req, res) => {
   try {
     const uid = req.user.UID;
     const subUID = req.user.SubUID || null;
-    let qry = `SELECT CustomerName, Mobile, (SELECT UID FROM Users WHERE Mobile=Customers.Mobile) AS UID
+    let qry = `SELECT CustomerName, Mobile, (SELECT TOP 1 UID FROM Users WHERE Mobile=Customers.Mobile ORDER BY UID ASC) AS UID
        FROM Customers WHERE fUID=@uid`;
     if (subUID) {
       const assigned = await getAssignedClients(uid, subUID);
       if (assigned) {
-        qry = `SELECT c.CustomerName, c.Mobile, (SELECT UID FROM Users WHERE Mobile=c.Mobile) AS UID
+        qry = `SELECT c.CustomerName, c.Mobile, (SELECT TOP 1 UID FROM Users WHERE Mobile=c.Mobile ORDER BY UID ASC) AS UID
          FROM Customers c
          INNER JOIN AssignClientToStaff a ON c.CID = a.fCustID AND a.fStaffID = @subUID AND (a.IsAssigned = 'True' OR a.IsAssigned = 1)
          WHERE c.fUID = @uid`;
@@ -186,6 +186,33 @@ router.get('/summary', requireAuth, async (req, res) => {
     if (assigned && data) {
       data = data.filter(r => assigned.isMatch(r));
     }
+
+    if (Array.isArray(data) && data.length) {
+      try {
+        const custRows = await executeQuery(
+          `SELECT CustomerName, Mobile, (SELECT TOP 1 UID FROM Users WHERE Mobile=Customers.Mobile ORDER BY UID ASC) AS UID
+           FROM Customers WHERE fUID=@uid`,
+          { uid }
+        );
+        const custMap = new Map();
+        (custRows || []).forEach(c => {
+          if (c.CustomerName) custMap.set(c.CustomerName.trim().toLowerCase(), c.UID);
+          if (c.Mobile) custMap.set(c.Mobile.trim().toLowerCase(), c.UID);
+          const clean = (c.CustomerName || '').replace(/\s+\d{4,5}$/, '').trim().toLowerCase();
+          if (clean) custMap.set(clean, c.UID);
+        });
+        data = data.map(r => {
+          const name = String(r.CustomerName || '').trim().toLowerCase();
+          const mob = String(r.Mobile || '').trim().toLowerCase();
+          const clean = name.replace(/\s+\d{4,5}$/, '').trim();
+          const custUID = custMap.get(name) || custMap.get(mob) || custMap.get(clean) || null;
+          return { ...r, CustUID: custUID };
+        });
+      } catch (mapErr) {
+        console.warn('hisab/summary CustUID mapping error:', mapErr.message);
+      }
+    }
+
     res.json({ success: true, data: data || [] });
   } catch (err) {
     console.error('hisab/summary:', err.message);
