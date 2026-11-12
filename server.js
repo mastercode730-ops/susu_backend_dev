@@ -59,6 +59,17 @@ const apiLimiter = rateLimit({
 
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/subuser-login', authLimiter);
+app.use('/api/sm/login', authLimiter);
+
+// Public payment submissions carry a screenshot — keep them rare per IP.
+const subscribeLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Bahut zyada requests. Thodi der baad try karein.' }
+});
+app.use('/api/subscription/request', subscribeLimiter);
 app.use('/api/', apiLimiter);
 
 // Routes
@@ -74,6 +85,8 @@ app.use('/api/received', require('./routes/received'));
 app.use('/api/lc', require('./routes/lc'));
 app.use('/api/yantri', require('./routes/yantri'));
 app.use('/api/admin', require('./routes/admin'));
+app.use('/api/subscription', require('./routes/subscription'));
+app.use('/api/sm', require('./routes/superManager'));
 
 app.get('/api/health', (req, res) => {
   res.json({

@@ -3,6 +3,7 @@ const router = express.Router();
 const jwt = require('jsonwebtoken');
 const { executeStoredProcedure, executeQuery } = require('../config/database');
 const { requireAuth } = require('../middleware/auth');
+const { getSubscription, denialFor } = require('../utils/subscription');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'susu9_mobile_jwt_secret_2024_xK9mP';
 
@@ -72,10 +73,26 @@ router.post('/login', async (req, res) => {
     }
 
     if (!users || users.length === 0) {
+      // The Login SP also rejects expired/blocked accounts. If the
+      // credentials are right, tell a subscribed Admin *why* instead of
+      // "wrong password".
+      try {
+        const match = await executeQuery(
+          `SELECT TOP 1 UID FROM Users WHERE Mobile = @mobile AND Password = @password`,
+          { mobile, password }
+        );
+        if (match && match[0]) {
+          const denial = denialFor(await getSubscription(match[0].UID, { fresh: true }));
+          if (denial) return res.status(403).json({ success: false, ...denial, mobile });
+        }
+      } catch (e) {}
       return res.status(401).json({ success: false, message: 'Mobile ya password galat hai' });
     }
 
     const user = users[0];
+    const subscription = await getSubscription(user.UID, { fresh: true });
+    const denial = denialFor(subscription);
+    if (denial) return res.status(403).json({ success: false, ...denial, mobile });
     let isRefreshStatus = 'False';
     try {
       const rf = await executeQuery(`SELECT IsRefreshStatus FROM Users WHERE UID=@uid`, { uid: user.UID });
@@ -92,7 +109,7 @@ router.post('/login', async (req, res) => {
     };
 
     const token = generateToken(payload);
-    res.json({ success: true, token, user: payload });
+    res.json({ success: true, token, user: { ...payload, Subscription: subscription } });
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ success: false, message: 'Server error: ' + err.message });
@@ -118,6 +135,16 @@ router.post('/subuser-login', async (req, res) => {
 
     const subUser = subUsers[0];
     const parentUID = subUser.fcreatedUID;
+    const parentDenial = denialFor(await getSubscription(parentUID, { fresh: true }));
+    if (parentDenial) {
+      return res.status(403).json({
+        success: false,
+        code: parentDenial.code,
+        message: parentDenial.code === 'ACCOUNT_BLOCKED'
+          ? 'Aapke Admin ka account block hai. Admin se contact karein.'
+          : 'Aapke Admin ka subscription expire ho gaya hai. Admin se renew karwayein.',
+      });
+    }
     const access = await bindAccessRight(subUserID);
 
     let parentMobile = '';
@@ -147,14 +174,41 @@ router.post('/subuser-login', async (req, res) => {
 // GET /api/auth/me
 router.get('/me', requireAuth, async (req, res) => {
   try {
-    const user = { ...req.user };
+    const { iat, exp, ...user } = req.user;
     if (user.SubUID) {
       const access = await bindAccessRight(user.SubUID);
       Object.assign(user, access);
     }
+    user.Subscription = req.subscription || null;
     res.json({ success: true, user });
   } catch (e) {
     res.json({ success: true, user: req.user });
+  }
+});
+
+// GET /api/auth/subscription — the signed-in Admin's plan + history.
+router.get('/subscription', requireAuth, async (req, res) => {
+  try {
+    const uid = req.user.UID;
+    const subscription = await getSubscription(uid, { fresh: true });
+    let history = [];
+    let usage = null;
+    if (subscription) {
+      history = await executeQuery(
+        `SELECT HistoryID, PlanName, Amount, DurationDays, StartDate, EndDate, Action, CreatedOn
+         FROM SubscriptionHistory WHERE fUID = @uid ORDER BY HistoryID DESC`,
+        { uid }
+      );
+      const counts = await executeQuery(
+        `SELECT (SELECT COUNT(*) FROM subusers WHERE fcreatedUID = @uid) AS SubUsers,
+                (SELECT COUNT(*) FROM Customers WHERE fUID = @uid) AS Customers`,
+        { uid }
+      );
+      usage = counts?.[0] || null;
+    }
+    res.json({ success: true, data: { subscription, usage, history: history || [] } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 
@@ -225,7 +279,17 @@ router.post('/reset-subuser-password', async (req, res) => {
 // POST /api/auth/register — login screen's "New User" self-signup. Creates
 // the account immediately active with no validity/expiry limit (same
 // UserSignUP SP the SuperAdmin panel uses, just without that gate).
+//
+// With the subscription model, new Admins are created by a Super Manager after
+// payment verification, so open signup is OFF unless ALLOW_SELF_REGISTER=true.
 router.post('/register', async (req, res) => {
+  if (String(process.env.ALLOW_SELF_REGISTER).toLowerCase() !== 'true') {
+    return res.status(403).json({
+      success: false,
+      code: 'REGISTRATION_CLOSED',
+      message: 'Naya account subscription lekar banta hai. Login page par "Get a Subscription" par click karein.',
+    });
+  }
   try {
     const { mobile, password } = req.body;
     if (!mobile || !password)

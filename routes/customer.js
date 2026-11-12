@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
+const { checkLimit } = require('../utils/subscription');
 const { executeStoredProcedure, executeQuery } = require('../config/database');
 
 router.get('/list', requireAuth, async (req, res) => {
@@ -84,6 +85,8 @@ router.post('/', requireAuth, async (req, res) => {
     } = req.body;
     const mob = mobileNo || mobile;
     if (!customerName || !mob) return res.status(400).json({ success: false, message: 'Name and mobile required' });
+    const limitMsg = await checkLimit(uid, 'customers');
+    if (limitMsg) return res.status(403).json({ success: false, code: 'PLAN_LIMIT', message: limitMsg });
     await executeStoredProcedure('CreateCustomers', {
       CustomerName: customerName, Mobile: mob,
       D_PComm: parseFloat(d_PComm) || 0, D_Amt: parseFloat(d_Amt) || 100, A_PComm: parseFloat(a_PComm) || 0, A_Amt: parseFloat(a_Amt) || 10,

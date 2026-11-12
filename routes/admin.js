@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
 const { executeStoredProcedure, executeQuery } = require('../config/database');
+const { checkLimit } = require('../utils/subscription');
 
 function isSuperAdmin(req) {
   const u = req.user;
@@ -109,6 +110,8 @@ router.post('/subusers', requireAuth, async (req, res) => {
     if (!mobile || !String(mobile).trim()) {
       return res.status(400).json({ success: false, message: 'Mobile number is required' });
     }
+    const limitMsg = await checkLimit(uid, 'subusers');
+    if (limitMsg) return res.status(403).json({ success: false, code: 'PLAN_LIMIT', message: limitMsg });
     await executeStoredProcedure('AddSubusers', {
       Name: String(name).trim(), Mobile: String(mobile).trim(), password: password || '', IsActive: isActive !== false, createdid: uid
     });
